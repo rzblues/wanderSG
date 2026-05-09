@@ -13,3 +13,8 @@ AI-generated, while factual claims are grounded in curated and official data.
 - Save discoveries into an itinerary that is useful for a real trip.
 - Separate AI-generated illustrations from verified factual content.
 
+## Project Docs
+
+- [PRODUCT.md](PRODUCT.md) is the product source of truth.
+- [AGENTS.md](AGENTS.md) is the operating guide for coding, research, image,
+  fact-check, and itinerary agents.
