@@ -338,6 +338,23 @@ test("overview includes static demo hotspots across west, east, and north Singap
   assert.ok(atlasNodes["changi-east-scroll"].childIds.includes("changi-airport"));
 });
 
+test("overview hotspot geometry matches Changi and Wildlife positions in the demo art", () => {
+  const overview = scrollScenes["singapore-overview"];
+  const changi = resolveImageClick({
+    scene: overview,
+    point: { x: 1450, y: 250 },
+    nodes: atlasNodes
+  });
+  const wildlife = resolveImageClick({
+    scene: overview,
+    point: { x: 1120, y: 205 },
+    nodes: atlasNodes
+  });
+
+  assert.equal(changi.nodeId, "changi-east-scroll");
+  assert.equal(wildlife.nodeId, "nature-wildlife-scroll");
+});
+
 test("image click resolver returns unmapped for unknown image regions", () => {
   const result = resolveImageClick({
     scene: scrollScenes["singapore-overview"],
@@ -513,10 +530,12 @@ test("scene artwork registry does not reuse old public generated images", () => 
   assert.equal(getSceneArtwork("unknown-scene"), null);
 });
 
-test("frontend homepage loads static generated artwork without runtime prewarm", () => {
+test("frontend homepage requests runtime artwork without hardcoded local host", () => {
   const appSource = readFileSync(new URL("../src/ui/app.js", import.meta.url), "utf8");
-  assert.match(appSource, /overview-codex-local\.png/);
-  assert.doesNotMatch(appSource, /requestSceneArtwork/);
+  assert.doesNotMatch(appSource, /overview-codex-local\.png/);
+  assert.doesNotMatch(appSource, /127\.0\.0\.1:4173/);
+  assert.match(appSource, /requestSceneArtwork/);
+  assert.match(appSource, /apiPath\("\/api\/flipbook\/click"\)/);
   assert.match(appSource, /getCurrentRequestPage/);
 });
 
@@ -564,7 +583,7 @@ test("overview wildlife hotspot is not stolen by synthetic child regions", () =>
       nodeId: "singapore",
       imageUrl: "./public/generated/scenes/singapore-overview/overview-codex-local.png"
     },
-    normalizedClick: { x: 0.86, y: 0.28 },
+    normalizedClick: { x: 0.67, y: 0.39 },
     scenes: scrollScenes,
     nodes: atlasNodes,
     sceneArtwork
@@ -798,10 +817,36 @@ test("runtime page clicks without reliable VLM should stay on the current page",
   assert.ok(currentPage.imageUrl.startsWith(RUNTIME_CACHE_URL_PREFIX));
 });
 
-test("server disables static hotspot fallback for flipbook click handling", () => {
+test("server keeps deterministic fallback for non-runtime flipbook click handling", () => {
   const serverSource = readFileSync(new URL("../scripts/dev-server.js", import.meta.url), "utf8");
   assert.match(serverSource, /resolveSemanticRegionHit/);
   assert.match(serverSource, /resolveClickPhraseWithOpenAI/);
+  assert.match(serverSource, /shouldUseLocalFallback/);
+  assert.match(serverSource, /!isRuntimePage/);
   assert.doesNotMatch(serverSource, /canUseStaticHomepageFallback/);
   assert.doesNotMatch(serverSource, /isHomepagePage/);
+  assert.doesNotMatch(serverSource, /resolvedPhrase:/);
+});
+
+test("server VLM resolver tolerates missing generated artwork", () => {
+  const serverSource = readFileSync(new URL("../scripts/dev-server.js", import.meta.url), "utf8");
+  assert.match(serverSource, /if \(!artwork\?\.imageUrl\)/);
+  assert.doesNotMatch(serverSource, /if \(!artwork\.imageUrl\)/);
+});
+
+test("server VLM resolver marks the clicked point in the image", () => {
+  const serverSource = readFileSync(new URL("../scripts/dev-server.js", import.meta.url), "utf8");
+  assert.match(serverSource, /annotateClickPointOnPng/);
+  assert.match(serverSource, /red crosshair with a white halo/);
+  assert.match(serverSource, /imageMarked: Boolean\(markedImage\)/);
+  assert.match(serverSource, /data:\$\{vlmMimeType\};base64/);
+});
+
+test("runtime image job polling is not cached by the browser", () => {
+  const serverSource = readFileSync(new URL("../scripts/dev-server.js", import.meta.url), "utf8");
+  const appSource = readFileSync(new URL("../src/ui/app.js", import.meta.url), "utf8");
+  assert.match(serverSource, /startsWith\("image-jobs\/"\)/);
+  assert.match(serverSource, /"Cache-Control": isMutableRuntimeJson/);
+  assert.match(serverSource, /"no-store"/);
+  assert.match(appSource, /fetch\(toApiUrl\(jobUrl\), \{ cache: "no-store" \}\)/);
 });

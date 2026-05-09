@@ -25,7 +25,7 @@ const model = normalizeFalImageModel(
   process.env.WANDERSG_IMAGE_MODEL ?? env.WANDERSG_IMAGE_MODEL ?? DEFAULT_FAL_IMAGE_MODEL
 );
 const aspectRatio = process.env.WANDERSG_IMAGE_ASPECT_RATIO ?? env.WANDERSG_IMAGE_ASPECT_RATIO ?? "16:9";
-const resolution = process.env.WANDERSG_IMAGE_RESOLUTION ?? env.WANDERSG_IMAGE_RESOLUTION ?? "2K";
+const resolution = process.env.WANDERSG_IMAGE_RESOLUTION ?? env.WANDERSG_IMAGE_RESOLUTION ?? "1K";
 const outputDir = path.join(root, "public", "generated", "scenes", "singapore-overview");
 const imagePath = path.join(outputDir, "overview-codex-local.png");
 const metadataPath = path.join(outputDir, "overview-codex-local.json");

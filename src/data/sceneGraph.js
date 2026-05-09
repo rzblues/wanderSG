@@ -307,13 +307,13 @@ export const scrollScenes = {
     columns: 4,
     rows: 1,
     hotspots: [
-      regionHotspot("hotspot-west-campus", "west-campus-scroll", "NTU / NUS", { x: 50, y: 260, width: 260, height: 190 }, 2, { type: "enter_scene", sceneId: "west-campus-scroll" }),
-      regionHotspot("hotspot-heritage", "heritage-belt-scroll", "Heritage Belt", { x: 360, y: 235, width: 240, height: 210 }, 2, { type: "enter_scene", sceneId: "heritage-belt-scroll" }),
-      regionHotspot("hotspot-marina", "marina-bay-scroll", "Marina Bay", { x: 610, y: 145, width: 250, height: 230 }, 2, { type: "enter_scene", sceneId: "marina-bay-scroll" }),
-      regionHotspot("hotspot-sentosa", "sentosa-south-scroll", "Sentosa", { x: 790, y: 335, width: 260, height: 160 }, 2, { type: "enter_scene", sceneId: "sentosa-south-scroll" }),
-      regionHotspot("hotspot-changi", "changi-east-scroll", "Changi", { x: 1050, y: 285, width: 250, height: 175 }, 2, { type: "enter_scene", sceneId: "changi-east-scroll" }),
-      regionHotspot("hotspot-nature", "nature-wildlife-scroll", "Nature", { x: 1210, y: 105, width: 280, height: 220 }, 2, { type: "enter_scene", sceneId: "nature-wildlife-scroll" }),
-      regionHotspot("hotspot-zoo", "singapore-zoo", "Singapore Zoo", { x: 1500, y: 55, width: 160, height: 170 }, 3, { type: "enter_scene", sceneId: "singapore-zoo-scroll" })
+      regionHotspot("hotspot-west-campus", "west-campus-scroll", "NTU / NUS", { x: 155, y: 185, width: 365, height: 160 }, 2, { type: "enter_scene", sceneId: "west-campus-scroll" }),
+      regionHotspot("hotspot-marina", "marina-bay-scroll", "Marina Bay", { x: 500, y: 175, width: 380, height: 190 }, 2, { type: "enter_scene", sceneId: "marina-bay-scroll" }),
+      regionHotspot("hotspot-heritage", "heritage-belt-scroll", "Heritage Belt", { x: 720, y: 95, width: 250, height: 120 }, 2, { type: "enter_scene", sceneId: "heritage-belt-scroll" }),
+      regionHotspot("hotspot-nature", "nature-wildlife-scroll", "Nature", { x: 980, y: 130, width: 320, height: 155 }, 2, { type: "enter_scene", sceneId: "nature-wildlife-scroll" }),
+      regionHotspot("hotspot-changi", "changi-east-scroll", "Changi", { x: 1285, y: 165, width: 330, height: 185 }, 2, { type: "enter_scene", sceneId: "changi-east-scroll" }),
+      regionHotspot("hotspot-sentosa", "sentosa-south-scroll", "Sentosa", { x: 900, y: 345, width: 500, height: 130 }, 2, { type: "enter_scene", sceneId: "sentosa-south-scroll" }),
+      regionHotspot("hotspot-zoo", "singapore-zoo", "Singapore Zoo", { x: 1065, y: 230, width: 130, height: 55 }, 3, { type: "enter_scene", sceneId: "singapore-zoo-scroll" })
     ]
   }),
   "west-campus-scroll": simpleScene("west-campus-scroll", "West Campus Scroll", "west-campus-scroll", ["nus", "ntu", "jurong-lake-gardens"]),

@@ -175,6 +175,16 @@ function resolveLocalPageClick({ currentNode, scene, point, scenes, nodes }) {
     return resolveImageClick({ scene, point, nodes });
   }
 
+  if (shouldUseSceneHotspots) {
+    return {
+      status: "unmapped",
+      nodeId: null,
+      phrase: "unmapped illustrated detail",
+      confidence: "unconfirmed",
+      reason: "No precomputed WanderSG region contains this click."
+    };
+  }
+
   const childCandidates = createFallbackChildRegionCandidates({
     currentNode,
     scene,
@@ -191,10 +201,6 @@ function resolveLocalPageClick({ currentNode, scene, point, scenes, nodes }) {
       action: childHotspot.action,
       reason: "Matched through current page precomputed click region."
     };
-  }
-
-  if (shouldUseSceneHotspots) {
-    return resolveImageClick({ scene, point, nodes });
   }
 
   return {

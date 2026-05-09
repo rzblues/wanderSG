@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { deflateSync, inflateSync } from "node:zlib";
 
 import { getSceneArtwork } from "../src/data/sceneArtwork.js";
 import {
@@ -69,6 +70,7 @@ createServer(async (request, response) => {
 
     await serveStatic(url.pathname, response);
   } catch (error) {
+    console.error("WanderSG dev server request failed:", error);
     response.writeHead(500, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ error: String(error?.message ?? error) }));
   }
@@ -105,12 +107,20 @@ async function handleResolveClick(request, response) {
 
 async function handleFlipbookClick(request, response) {
   const body = await readJson(request);
+  const normalizedClick = body.imageClick?.normalizedImage ?? body.normalizedClick;
+  const localResult = !body.targetNodeId && !body.detourPhrase
+    ? resolveDeterministicClick({
+        currentPage: body.currentPage,
+        normalizedClick
+      })
+    : null;
+
   const semanticHit = await resolveSemanticRegionHit({
     currentPage: body.currentPage,
-    normalizedClick: body.imageClick?.normalizedImage ?? body.normalizedClick
+    normalizedClick
   });
   if (semanticHit) {
-    const semanticClick = semanticHit.cacheClick ?? centerOfBox(semanticHit.bbox) ?? body.normalizedClick;
+    const semanticClick = semanticHit.cacheClick ?? centerOfBox(semanticHit.bbox) ?? normalizedClick;
     const result = resolveFlipbookClick({
       currentPage: body.currentPage,
       normalizedClick: semanticClick,
@@ -149,28 +159,34 @@ async function handleFlipbookClick(request, response) {
           phrase: vlm.phrase
         })
       : null;
-  const localResult = resolveFlipbookClick({
-    currentPage: body.currentPage,
-    normalizedClick: body.normalizedClick,
-    targetNodeId: body.targetNodeId,
-    detourPhrase: body.detourPhrase,
-    scenes: scrollScenes,
-    nodes: atlasNodes,
-    sceneArtwork
-  });
   const shouldUseVlmMatch =
     vlmMatch?.status === "matched" &&
     (!isRuntimePage || vlmMatch.confidence === "confirmed");
   const shouldUseVlmDetour =
     !body.targetNodeId &&
     !body.detourPhrase &&
-    (localResult.click.status === "unmapped" || isRuntimePage) &&
     !shouldUseVlmMatch &&
     hasReliableVlm;
-  const result = shouldUseVlmMatch
+  const shouldUseLocalFallback =
+    !body.targetNodeId &&
+    !body.detourPhrase &&
+    !isRuntimePage &&
+    localResult?.click?.status === "matched" &&
+    (!hasReliableVlm || vlmMatch?.nodeId !== localResult.click.nodeId);
+  const result = body.targetNodeId || body.detourPhrase
     ? resolveFlipbookClick({
         currentPage: body.currentPage,
-        normalizedClick: body.normalizedClick,
+        normalizedClick,
+        targetNodeId: body.targetNodeId,
+        detourPhrase: body.detourPhrase,
+        scenes: scrollScenes,
+        nodes: atlasNodes,
+        sceneArtwork
+      })
+    : shouldUseVlmMatch
+    ? resolveFlipbookClick({
+        currentPage: body.currentPage,
+        normalizedClick,
         targetNodeId: vlmMatch.nodeId,
         scenes: scrollScenes,
         nodes: atlasNodes,
@@ -179,23 +195,23 @@ async function handleFlipbookClick(request, response) {
     : shouldUseVlmDetour
     ? resolveFlipbookClick({
         currentPage: body.currentPage,
-        normalizedClick: body.normalizedClick,
+        normalizedClick,
         detourPhrase: vlm.phrase,
         scenes: scrollScenes,
         nodes: atlasNodes,
         sceneArtwork
       })
-    : !body.targetNodeId && !body.detourPhrase
-    ? createUnresolvedClickResult({
+    : shouldUseLocalFallback
+    ? localResult
+    : createUnresolvedClickResult({
         currentPage: body.currentPage,
-        normalizedClick: body.normalizedClick,
+        normalizedClick,
         vlm
-      })
-    : localResult;
+      });
 
   await appendSemanticRegionFromResult({
     currentPage: body.currentPage,
-    normalizedClick: body.imageClick?.normalizedImage ?? body.normalizedClick,
+    normalizedClick,
     result,
     vlm
   });
@@ -205,7 +221,11 @@ async function handleFlipbookClick(request, response) {
     phrase: vlm.phrase ?? null,
     matchedNodeId: vlmMatch?.nodeId ?? null,
     confidence: vlm.confidence ?? null,
-    reason: vlm.reason ?? null
+    reason: vlm.reason ?? null,
+    imageMarked: vlm.imageMarked ?? null,
+    fallbackReason: shouldUseLocalFallback
+      ? "Curated hotspot overrode missing or conflicting VLM match."
+      : null
   };
 
   if (result.page.status === "generation_required") {
@@ -214,6 +234,21 @@ async function handleFlipbookClick(request, response) {
 
   response.writeHead(200, { "Content-Type": "application/json" });
   response.end(JSON.stringify(result));
+}
+
+function resolveDeterministicClick({ currentPage, normalizedClick }) {
+  const scene = scrollScenes[currentPage?.sceneId];
+  if (!scene || scene.rootNodeId !== currentPage?.nodeId || !normalizedClick) {
+    return null;
+  }
+
+  return resolveFlipbookClick({
+    currentPage,
+    normalizedClick,
+    scenes: scrollScenes,
+    nodes: atlasNodes,
+    sceneArtwork
+  });
 }
 
 async function resolveSemanticRegionHit({ currentPage, normalizedClick }) {
@@ -500,31 +535,6 @@ async function createCodexImageJob(page, { jobKind = "interactive" } = {}) {
     };
   }
 
-  if (
-    existingMatchesRequest &&
-    (existingJob?.status === "pending_codex_image_generation" ||
-      existingJob?.status === "processing_openai_image")
-  ) {
-    if (hasConfiguredImageProvider() && existingJob.autoProcess !== true) {
-      await writeCodexImageJob(jobPath, {
-        ...existingJob,
-        jobKind: existingJob.jobKind ?? jobKind,
-        autoProcess: true,
-        updatedAt: new Date().toISOString()
-      });
-    }
-    return {
-      ...page,
-      status: "pending_codex_image_generation",
-      generated: {
-        source: "image-generation-required",
-        jobUrl,
-        reused: true,
-        factBoundary: "Generated image is visual only and is not a fact source."
-      }
-    };
-  }
-
   const existingMetadata = await readRuntimeImageMetadata(paths.metadataPath);
   const existingMetadataMatchesRequest =
     existingMetadata?.prompt === prompt &&
@@ -564,6 +574,31 @@ async function createCodexImageJob(page, { jobKind = "interactive" } = {}) {
       status: "ready",
       generated: {
         source: readyJob.source,
+        jobUrl,
+        reused: true,
+        factBoundary: "Generated image is visual only and is not a fact source."
+      }
+    };
+  }
+
+  if (
+    existingMatchesRequest &&
+    (existingJob?.status === "pending_codex_image_generation" ||
+      existingJob?.status === "processing_openai_image")
+  ) {
+    if (hasConfiguredImageProvider() && existingJob.autoProcess !== true) {
+      await writeCodexImageJob(jobPath, {
+        ...existingJob,
+        jobKind: existingJob.jobKind ?? jobKind,
+        autoProcess: true,
+        updatedAt: new Date().toISOString()
+      });
+    }
+    return {
+      ...page,
+      status: "pending_codex_image_generation",
+      generated: {
+        source: "image-generation-required",
         jobUrl,
         reused: true,
         factBoundary: "Generated image is visual only and is not a fact source."
@@ -794,7 +829,7 @@ async function generateConfiguredImage({ model, prompt }) {
       model,
       prompt,
       aspectRatio: process.env.WANDERSG_IMAGE_ASPECT_RATIO ?? "16:9",
-      resolution: process.env.WANDERSG_IMAGE_RESOLUTION ?? "2K",
+      resolution: process.env.WANDERSG_IMAGE_RESOLUTION ?? "1K",
       systemPrompt: process.env.WANDERSG_IMAGE_SYSTEM_PROMPT ?? DEFAULT_WANDERSG_IMAGE_SYSTEM_PROMPT
     });
   }
@@ -819,7 +854,7 @@ async function resolveClickPhraseWithOpenAI({ sceneId, imageUrl, normalizedClick
   const artwork = imageUrl
     ? { imageUrl }
     : getSceneArtwork(sceneId) ?? getSceneArtwork("singapore-overview");
-  if (!artwork.imageUrl) {
+  if (!artwork?.imageUrl) {
     return {
       status: "image_missing",
       phrase: null,
@@ -836,6 +871,12 @@ async function resolveClickPhraseWithOpenAI({ sceneId, imageUrl, normalizedClick
     };
   }
   const imageBytes = await readFile(imagePath);
+  const clickPoint = imageClick?.normalizedImage ?? normalizedClick ?? null;
+  const markedImage = clickPoint
+    ? annotateClickPointOnPng(imageBytes, clickPoint.x, clickPoint.y)
+    : null;
+  const vlmImageBytes = markedImage?.bytes ?? imageBytes;
+  const vlmMimeType = markedImage?.mimeType ?? mimeTypeForImagePath(imagePath);
   const coordinateText = imageClick?.normalizedImage
     ? [
         `Click coordinates in original image pixels: x=${imageClick.pixel?.x}, y=${imageClick.pixel?.y}.`,
@@ -848,7 +889,8 @@ async function resolveClickPhraseWithOpenAI({ sceneId, imageUrl, normalizedClick
   const candidateText = getSceneCandidateText(sceneId);
   const prompt = [
     "You are WanderSG's click resolver.",
-    "Describe only the exact visual subject at the clicked pixel in this illustrated Singapore atlas image.",
+    "A red crosshair with a white halo marks the user's click. Ignore the marker itself.",
+    "Describe only the exact visual subject under or closest to the crosshair in this illustrated Singapore atlas image.",
     "If the clicked region contains or is closest to one of the known WanderSG candidate labels, return that exact candidate label.",
     "Be specific. If the user clicked an infinity pool, roof garden, animal, dome, bridge, beach, canopy, food stall, or building part, name that visual subject.",
     candidateText,
@@ -874,7 +916,7 @@ async function resolveClickPhraseWithOpenAI({ sceneId, imageUrl, normalizedClick
             { type: "input_text", text: prompt },
             {
               type: "input_image",
-              image_url: `data:image/png;base64,${imageBytes.toString("base64")}`,
+              image_url: `data:${vlmMimeType};base64,${vlmImageBytes.toString("base64")}`,
               detail: "high"
             }
           ]
@@ -897,6 +939,7 @@ async function resolveClickPhraseWithOpenAI({ sceneId, imageUrl, normalizedClick
   try {
     return {
       status: "resolved",
+      imageMarked: Boolean(markedImage),
       ...JSON.parse(text)
     };
   } catch {
@@ -904,6 +947,7 @@ async function resolveClickPhraseWithOpenAI({ sceneId, imageUrl, normalizedClick
       status: "resolved",
       phrase: text,
       confidence: "low",
+      imageMarked: Boolean(markedImage),
       reason: "Model returned non-JSON text."
     };
   }
@@ -919,7 +963,252 @@ function getSceneCandidateText(sceneId) {
   return `Known WanderSG candidate labels for this page: ${candidateLabels.join(", ")}.`;
 }
 
+function annotateClickPointOnPng(imageBytes, normalizedX, normalizedY) {
+  try {
+    const png = decodeSimplePng(imageBytes);
+    if (!png) return null;
+
+    const x = Math.round(clamp01(normalizedX) * (png.width - 1));
+    const y = Math.round(clamp01(normalizedY) * (png.height - 1));
+    const radius = Math.max(24, Math.round(Math.min(png.width, png.height) * 0.035));
+    const haloWidth = Math.max(7, Math.round(radius * 0.16));
+    const redWidth = Math.max(3, Math.round(radius * 0.08));
+
+    drawCrosshair(png, x, y, radius + haloWidth, haloWidth, [255, 255, 255, 255]);
+    drawCircle(png, x, y, Math.round(radius * 0.55), haloWidth, [255, 255, 255, 255]);
+    drawCrosshair(png, x, y, radius, redWidth, [226, 32, 32, 255]);
+    drawCircle(png, x, y, Math.round(radius * 0.55), redWidth, [226, 32, 32, 255]);
+    drawFilledCircle(png, x, y, Math.max(3, redWidth), [226, 32, 32, 255]);
+
+    return {
+      bytes: encodeSimplePng(png),
+      mimeType: "image/png"
+    };
+  } catch {
+    return null;
+  }
+}
+
+function decodeSimplePng(buffer) {
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  if (!Buffer.isBuffer(buffer) || buffer.length < signature.length || !buffer.subarray(0, 8).equals(signature)) {
+    return null;
+  }
+
+  let offset = 8;
+  let header = null;
+  const idatChunks = [];
+  while (offset + 12 <= buffer.length) {
+    const length = buffer.readUInt32BE(offset);
+    const type = buffer.subarray(offset + 4, offset + 8).toString("ascii");
+    const data = buffer.subarray(offset + 8, offset + 8 + length);
+    offset += 12 + length;
+
+    if (type === "IHDR") {
+      header = {
+        width: data.readUInt32BE(0),
+        height: data.readUInt32BE(4),
+        bitDepth: data[8],
+        colorType: data[9],
+        compression: data[10],
+        filter: data[11],
+        interlace: data[12]
+      };
+    } else if (type === "IDAT") {
+      idatChunks.push(data);
+    } else if (type === "IEND") {
+      break;
+    }
+  }
+
+  if (
+    !header ||
+    header.bitDepth !== 8 ||
+    ![2, 6].includes(header.colorType) ||
+    header.compression !== 0 ||
+    header.filter !== 0 ||
+    header.interlace !== 0 ||
+    idatChunks.length === 0
+  ) {
+    return null;
+  }
+
+  const channels = header.colorType === 6 ? 4 : 3;
+  const stride = header.width * channels;
+  const inflated = inflateSync(Buffer.concat(idatChunks));
+  const pixels = Buffer.alloc(header.width * header.height * channels);
+  let srcOffset = 0;
+  let prevRow = Buffer.alloc(stride);
+
+  for (let row = 0; row < header.height; row += 1) {
+    const filter = inflated[srcOffset];
+    srcOffset += 1;
+    const rawRow = inflated.subarray(srcOffset, srcOffset + stride);
+    srcOffset += stride;
+    const decodedRow = unfilterPngRow(rawRow, prevRow, filter, channels);
+    decodedRow.copy(pixels, row * stride);
+    prevRow = decodedRow;
+  }
+
+  return {
+    width: header.width,
+    height: header.height,
+    colorType: header.colorType,
+    channels,
+    pixels
+  };
+}
+
+function unfilterPngRow(row, previousRow, filter, bytesPerPixel) {
+  const output = Buffer.alloc(row.length);
+  for (let i = 0; i < row.length; i += 1) {
+    const left = i >= bytesPerPixel ? output[i - bytesPerPixel] : 0;
+    const up = previousRow[i] ?? 0;
+    const upperLeft = i >= bytesPerPixel ? previousRow[i - bytesPerPixel] ?? 0 : 0;
+    let value;
+    if (filter === 0) {
+      value = row[i];
+    } else if (filter === 1) {
+      value = row[i] + left;
+    } else if (filter === 2) {
+      value = row[i] + up;
+    } else if (filter === 3) {
+      value = row[i] + Math.floor((left + up) / 2);
+    } else if (filter === 4) {
+      value = row[i] + paethPredictor(left, up, upperLeft);
+    } else {
+      throw new Error(`Unsupported PNG filter ${filter}`);
+    }
+    output[i] = value & 0xff;
+  }
+  return output;
+}
+
+function paethPredictor(left, up, upperLeft) {
+  const estimate = left + up - upperLeft;
+  const leftDistance = Math.abs(estimate - left);
+  const upDistance = Math.abs(estimate - up);
+  const upperLeftDistance = Math.abs(estimate - upperLeft);
+  if (leftDistance <= upDistance && leftDistance <= upperLeftDistance) return left;
+  if (upDistance <= upperLeftDistance) return up;
+  return upperLeft;
+}
+
+function drawCrosshair(png, centerX, centerY, radius, thickness, color) {
+  drawRect(png, centerX - radius, centerY - Math.floor(thickness / 2), radius * 2 + 1, thickness, color);
+  drawRect(png, centerX - Math.floor(thickness / 2), centerY - radius, thickness, radius * 2 + 1, color);
+}
+
+function drawCircle(png, centerX, centerY, radius, thickness, color) {
+  const outer = radius + Math.ceil(thickness / 2);
+  const inner = Math.max(0, radius - Math.floor(thickness / 2));
+  const outerSq = outer * outer;
+  const innerSq = inner * inner;
+  for (let y = centerY - outer; y <= centerY + outer; y += 1) {
+    for (let x = centerX - outer; x <= centerX + outer; x += 1) {
+      const distanceSq = (x - centerX) ** 2 + (y - centerY) ** 2;
+      if (distanceSq >= innerSq && distanceSq <= outerSq) {
+        setPngPixel(png, x, y, color);
+      }
+    }
+  }
+}
+
+function drawFilledCircle(png, centerX, centerY, radius, color) {
+  const radiusSq = radius * radius;
+  for (let y = centerY - radius; y <= centerY + radius; y += 1) {
+    for (let x = centerX - radius; x <= centerX + radius; x += 1) {
+      if ((x - centerX) ** 2 + (y - centerY) ** 2 <= radiusSq) {
+        setPngPixel(png, x, y, color);
+      }
+    }
+  }
+}
+
+function drawRect(png, x, y, width, height, color) {
+  for (let yy = y; yy < y + height; yy += 1) {
+    for (let xx = x; xx < x + width; xx += 1) {
+      setPngPixel(png, xx, yy, color);
+    }
+  }
+}
+
+function setPngPixel(png, x, y, color) {
+  if (x < 0 || y < 0 || x >= png.width || y >= png.height) return;
+  const offset = (y * png.width + x) * png.channels;
+  png.pixels[offset] = color[0];
+  png.pixels[offset + 1] = color[1];
+  png.pixels[offset + 2] = color[2];
+  if (png.channels === 4) png.pixels[offset + 3] = color[3];
+}
+
+function encodeSimplePng(png) {
+  const stride = png.width * png.channels;
+  const scanlines = Buffer.alloc((stride + 1) * png.height);
+  for (let row = 0; row < png.height; row += 1) {
+    const targetOffset = row * (stride + 1);
+    scanlines[targetOffset] = 0;
+    png.pixels.copy(scanlines, targetOffset + 1, row * stride, (row + 1) * stride);
+  }
+
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(png.width, 0);
+  ihdr.writeUInt32BE(png.height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = png.colorType;
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    createPngChunk("IHDR", ihdr),
+    createPngChunk("IDAT", deflateSync(scanlines)),
+    createPngChunk("IEND", Buffer.alloc(0))
+  ]);
+}
+
+function createPngChunk(type, data) {
+  const typeBuffer = Buffer.from(type, "ascii");
+  const chunk = Buffer.alloc(8 + data.length + 4);
+  chunk.writeUInt32BE(data.length, 0);
+  typeBuffer.copy(chunk, 4);
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])), 8 + data.length);
+  return chunk;
+}
+
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc = PNG_CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+const PNG_CRC_TABLE = Array.from({ length: 256 }, (_, index) => {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  }
+  return value >>> 0;
+});
+
+function mimeTypeForImagePath(imagePath) {
+  const ext = path.extname(imagePath).toLowerCase();
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".webp") return "image/webp";
+  if (ext === ".png") return "image/png";
+  return "application/octet-stream";
+}
+
 async function serveStatic(pathname, response) {
+  if (pathname === "/favicon.ico") {
+    response.writeHead(204);
+    response.end();
+    return;
+  }
+
   if (pathname.startsWith(`${RUNTIME_CACHE_URL_PREFIX}/`)) {
     await serveRuntimeCache(pathname, response);
     return;
@@ -953,9 +1242,15 @@ async function serveRuntimeCache(pathname, response) {
 
   const file = await readFile(filePath);
   const ext = path.extname(filePath);
+  const isMutableRuntimeJson =
+    compatibleRelativePath.startsWith("image-jobs/") ||
+    compatibleRelativePath.startsWith("codex-jobs/") ||
+    compatibleRelativePath.startsWith("understanding/");
   response.writeHead(200, {
     "Content-Type": mimeTypes[ext] ?? "application/octet-stream",
-    "Cache-Control": "private, max-age=31536000, immutable"
+    "Cache-Control": isMutableRuntimeJson
+      ? "no-store"
+      : "private, max-age=31536000, immutable"
   });
   response.end(file);
 }

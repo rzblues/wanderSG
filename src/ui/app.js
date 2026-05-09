@@ -6,7 +6,7 @@ const rootPage = {
   id: "root",
   sceneId: "singapore-overview",
   nodeId: "singapore",
-  imageUrl: "./public/generated/scenes/singapore-overview/overview-codex-local.png",
+  imageUrl: null,
   parentId: null,
   parentClick: null,
   status: "ready"
@@ -18,6 +18,8 @@ const state = {
   selectedNodeId: null,
   history: [],
   pendingJob: null,
+  artworkJobs: new Map(),
+  artworkByScene: new Map(),
   isResolvingClick: false
 };
 
@@ -62,6 +64,7 @@ function renderScene() {
   const scene = scrollScenes[state.currentSceneId];
   const rootNode = atlasNodes[scene.rootNodeId];
   const pageNode = atlasNodes[state.currentPage.nodeId];
+  const sceneArtwork = state.artworkByScene.get(scene.id);
   const pageTitle = state.currentPage.plan?.title ?? pageNode?.title ?? scene.title;
   elements.sceneTitle.textContent = pageTitle;
   elements.breadcrumb.textContent = pageNode
@@ -69,8 +72,11 @@ function renderScene() {
     : rootNode
     ? `${rootNode.title} · ${state.currentPage.status}`
     : "Curated scene";
-  const imageUrl = state.currentPage.sceneId === scene.id ? state.currentPage.imageUrl : null;
-  const isArtworkPending = false;
+  const imageUrl =
+    state.currentPage.sceneId === scene.id
+      ? state.currentPage.imageUrl ?? sceneArtwork?.imageUrl
+      : sceneArtwork?.imageUrl;
+  const isArtworkPending = !imageUrl && state.artworkJobs.has(scene.id);
   elements.stage.classList.toggle("has-local-art", Boolean(imageUrl));
   elements.stage.classList.toggle("is-artwork-pending", isArtworkPending);
   if (imageUrl) {
@@ -84,6 +90,9 @@ function renderScene() {
     ...scene.tiles.map(renderTile)
   );
   elements.stage.dataset.scene = scene.id;
+  if (!imageUrl && !isArtworkPending) {
+    requestSceneArtwork(scene.id);
+  }
 }
 
 function renderArtworkPending(scene) {
@@ -120,8 +129,6 @@ async function resolveClickAt(event) {
     return;
   }
 
-  state.isResolvingClick = true;
-  elements.viewport.classList.add("is-busy");
   const stageRect = elements.stage.getBoundingClientRect();
   const scene = scrollScenes[state.currentSceneId];
   const normalizedClick = {
@@ -129,6 +136,8 @@ async function resolveClickAt(event) {
     y: clamp01((event.clientY - stageRect.top) / stageRect.height)
   };
   const imageClick = computeImageClick(event, stageRect);
+  state.isResolvingClick = true;
+  elements.viewport.classList.add("is-busy");
   try {
     const result = await requestFlipbookPage({ normalizedClick, imageClick });
     runFlipbookResult(result, scene, normalizedClick);
@@ -169,7 +178,7 @@ async function resolveOverlayTarget(target) {
 }
 
 async function requestFlipbookPage({ normalizedClick, imageClick = null, targetNodeId = null, detourPhrase = null }) {
-  const response = await fetch("/api/flipbook/click", {
+  const response = await fetch(apiPath("/api/flipbook/click"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -182,14 +191,82 @@ async function requestFlipbookPage({ normalizedClick, imageClick = null, targetN
   });
 
   if (!response.ok) {
-    throw new Error(`Flipbook click failed: ${response.status}`);
+    const body = await response.text().catch(() => "");
+    throw new Error(`Flipbook click failed: ${response.status}${body ? ` ${body.slice(0, 240)}` : ""}`);
   }
 
   return response.json();
 }
 
 function getCurrentRequestPage() {
-  return state.currentPage;
+  const sceneArtwork = state.artworkByScene.get(state.currentSceneId);
+  const imageUrl = state.currentPage.imageUrl ?? sceneArtwork?.imageUrl ?? null;
+  return imageUrl === state.currentPage.imageUrl
+    ? state.currentPage
+    : {
+        ...state.currentPage,
+        imageUrl,
+        status: imageUrl ? "ready" : state.currentPage.status
+      };
+}
+
+async function requestSceneArtwork(sceneId) {
+  if (state.artworkByScene.has(sceneId) || state.artworkJobs.has(sceneId)) {
+    return;
+  }
+
+  state.artworkJobs.set(sceneId, { status: "requesting" });
+  render();
+  try {
+    const response = await fetch(apiPath(`/api/artwork?sceneId=${encodeURIComponent(sceneId)}`), { cache: "no-store" });
+    if (!response.ok) throw new Error(`Artwork request failed: ${response.status}`);
+    const { page } = await response.json();
+    if (page.status === "ready" && page.imageUrl) {
+      state.artworkByScene.set(sceneId, { imageUrl: page.imageUrl, page });
+      state.artworkJobs.delete(sceneId);
+      if (state.currentSceneId === sceneId && !state.currentPage.imageUrl) {
+        state.currentPage = { ...state.currentPage, imageUrl: page.imageUrl, status: "ready" };
+      }
+      render();
+      return;
+    }
+
+    const jobUrl = page.generated?.jobUrl;
+    state.artworkJobs.set(sceneId, {
+      page,
+      intervalId: jobUrl ? window.setInterval(() => pollArtworkJob(sceneId, jobUrl, page), 1600) : null
+    });
+    if (jobUrl) {
+      pollArtworkJob(sceneId, jobUrl, page);
+    }
+  } catch (error) {
+    state.artworkJobs.set(sceneId, { status: "failed", error: explainClickError(error) });
+    render();
+  }
+}
+
+async function pollArtworkJob(sceneId, jobUrl, page) {
+  try {
+    const response = await fetch(toApiUrl(jobUrl), { cache: "no-store" });
+    if (!response.ok) return;
+    const job = await response.json();
+    if (job.status !== "ready" || !job.imageUrl) return;
+    const artworkJob = state.artworkJobs.get(sceneId);
+    if (artworkJob?.intervalId) {
+      window.clearInterval(artworkJob.intervalId);
+    }
+    state.artworkJobs.delete(sceneId);
+    state.artworkByScene.set(sceneId, {
+      imageUrl: job.imageUrl,
+      page: { ...page, imageUrl: job.imageUrl, status: "ready" }
+    });
+    if (state.currentSceneId === sceneId && !state.currentPage.imageUrl) {
+      state.currentPage = { ...state.currentPage, imageUrl: job.imageUrl, status: "ready" };
+    }
+    render();
+  } catch {
+    // Keep polling; runtime artwork may still be generating.
+  }
 }
 
 function computeImageClick(event, stageRect) {
@@ -332,7 +409,7 @@ function renderDetour(detour) {
 function explainClickError(error) {
   const message = String(error?.message ?? error);
   if (message === "Failed to fetch" || error?.name === "TypeError") {
-    return "The browser could not reach the WanderSG dev server. Open the app at http://127.0.0.1:4173 and make sure npm run dev is still running.";
+    return "The browser could not reach the WanderSG dev server. Open the app through npm run dev, not as a file, and make sure the server is still running.";
   }
   return message;
 }
@@ -367,11 +444,14 @@ function renderImageGenerationPending(page, result) {
       <p>${page.generated?.jobUrl ?? "Job file pending."}</p>
     </article>
   `;
+  if (jobUrl) {
+    pollImageJob(jobUrl, page);
+  }
 }
 
 async function pollImageJob(jobUrl, page) {
   try {
-    const response = await fetch(jobUrl.replace(/^\.\//, "/"));
+    const response = await fetch(toApiUrl(jobUrl), { cache: "no-store" });
     if (!response.ok) return;
     const job = await response.json();
     if (job.status !== "ready" || !job.imageUrl) return;
@@ -389,6 +469,18 @@ async function pollImageJob(jobUrl, page) {
   } catch {
     // Keep polling; the job may not exist yet during development.
   }
+}
+
+function toApiUrl(path) {
+  if (String(path).startsWith("http")) return path;
+  return apiPath(String(path).replace(/^\.\//, "/"));
+}
+
+function apiPath(path) {
+  if (!window.location.origin.startsWith("http")) {
+    throw new Error("WanderSG must be opened through the dev server, not as a local file.");
+  }
+  return path;
 }
 
 function clearPendingJob() {

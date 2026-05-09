@@ -1,7 +1,7 @@
 export const DEFAULT_IMAGE_MODEL = "gpt-image-2";
 export const DEFAULT_IMAGE_SIZE = "1024x1024";
 export const DEFAULT_FAL_IMAGE_MODEL = "fal-ai/nano-banana-2";
-export const DEFAULT_FAL_IMAGE_RESOLUTION = "2K";
+export const DEFAULT_FAL_IMAGE_RESOLUTION = "1K";
 export const DEFAULT_WANDERSG_IMAGE_SYSTEM_PROMPT = `
 You are the WanderSG Image Prompt Compiler and visual style director.
 
